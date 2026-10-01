@@ -1,0 +1,9 @@
+# 로컬 실행 결과물은 이미지에 넣지 않는다 - 이미지는 build_seed.csv로 처음부터 학습한다 (Dockerfile)
+AIOps/
+**/__pycache__/
+**/.DS_Store
+mlruns/
+mlflow.db
+logs/
+data/uploads/*.csv
+data/scenarios/

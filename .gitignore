@@ -1,0 +1,11 @@
+# 가상환경·캐시
+AIOps/
+__pycache__/
+.DS_Store
+
+# 실행 결과물 (디스크에는 남아 있음, git 추적만 제외)
+mlruns/
+mlflow.db
+logs/
+data/uploads/*.csv
+data/scenarios/

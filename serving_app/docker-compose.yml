@@ -1,0 +1,14 @@
+# Day2: FastAPI 서빙 앱 컨테이너 (단일 서비스)
+#
+# MLflow는 별도 서버 없이 이 컨테이너 안에서 로컬 sqlite로 트래킹합니다(Dockerfile 참고).
+# 이미지 빌드 시점에 샘플 데이터 시드 -> 베이스라인 학습 -> MLflow 등록까지 전부 끝나 있으므로,
+# 별도 초기화 단계나 기동 순서 없이 한 번에 띄우면 됩니다.
+#
+#   docker compose -f serving_app/docker-compose.yml up --build
+#
+services:
+  serving-app:
+    build:
+      context: ..
+      dockerfile: serving_app/Dockerfile
+    ports: ["8000:8000"]

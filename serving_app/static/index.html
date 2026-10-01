@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AIOps · 서버실 온도 재학습 파이프라인</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico" />
+<style>
+  :root {
+    --bg: #0a0c10;
+    --panel: #12151c;
+    --panel-2: #171b25;
+    --border: #262b38;
+    --text: #eef1f7;
+    --muted: #9aa4b8;
+    --faint: #5b6478;
+    --accent: #6c8dff;
+    --accent-soft: rgba(108, 141, 255, 0.16);
+    --ok: #3ddc97;
+    --ok-soft: rgba(61, 220, 151, 0.14);
+    --warn: #f5b64c;
+    --warn-soft: rgba(245, 182, 76, 0.14);
+    --err: #ff6b6b;
+    --err-soft: rgba(255, 107, 107, 0.14);
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+  .topnav {
+    display: flex; align-items: center; gap: 14px; justify-content: space-between;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0 20px; height: 60px; position: sticky; top: 0; z-index: 10;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), #a9bdff);
+    display: flex; align-items: center; justify-content: center; color: #0a0c10;
+    flex-shrink: 0;
+  }
+  .brand-text .title { font-weight: 700; font-size: 1.02rem; line-height: 1.2; }
+  .brand-text .subtitle { font-size: 0.72rem; color: var(--muted); }
+  .nav-right { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px;
+    font-size: 0.74rem; font-weight: 700;
+  }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.err { background: var(--err-soft); color: var(--err); }
+  .pill.neutral { background: var(--panel-2); color: var(--muted); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .page { max-width: 980px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 20px;
+  }
+  .section-head { margin-bottom: 14px; }
+  .section-head h2 { margin: 0 0 3px; font-size: 1.05rem; }
+  .section-head p { margin: 0; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
+  .section-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+  .btn { border: none; border-radius: 9px; padding: 9px 14px; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
+  .btn.primary { background: var(--accent); color: #0a0c10; }
+  .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  .btn.danger { background: var(--err); color: #1a0a0a; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+
+  /* ---------- Upload ---------- */
+  .upload-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  input[type="file"] {
+    color: var(--muted); font-size: 0.82rem; max-width: 100%;
+  }
+
+  /* ---------- Pipeline ---------- */
+  .pipeline-meta { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
+  .pipeline-track { display: flex; align-items: stretch; overflow-x: auto; padding: 2px 2px 4px; gap: 0; }
+  .pipe-stage { flex: 1; min-width: 110px; text-align: center; padding: 10px 10px; border-left: 1px solid var(--border); }
+  .pipe-stage:first-child { border-left: none; }
+  .pipe-title { font-size: 0.82rem; font-weight: 700; color: var(--faint); }
+  .pipe-stage.ok .pipe-title, .pipe-stage.warn .pipe-title { color: var(--text); }
+  .pipe-desc { font-size: 0.7rem; color: var(--muted); margin: 2px 0 6px; line-height: 1.4; }
+  .pipe-status { font-size: 0.7rem; font-weight: 700; }
+  .pipe-stage.ok .pipe-status { color: var(--ok); }
+  .pipe-stage.warn .pipe-status { color: var(--warn); }
+  .pipe-stage.idle .pipe-status { color: var(--faint); }
+  .pipe-stage.err .pipe-status { color: var(--err); }
+
+  /* ---------- Tables ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase;
+       letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .table-empty { color: var(--faint); font-size: 0.82rem; padding: 20px 4px; text-align: center; }
+
+  .result-box {
+    margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: var(--panel-2);
+    border: 1px solid var(--border); font-family: var(--mono); font-size: 0.8rem;
+    white-space: pre-wrap; word-break: break-word; display: none; max-height: 260px; overflow-y: auto;
+  }
+  .result-box.show { display: block; }
+
+  code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  footer { color: var(--faint); font-size: 0.76rem; text-align: center; margin: 26px 0 10px; }
+</style>
+</head>
+<body>
+
+<div class="topnav">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M2 12h4l2-7 4 14 3-10 2 3h5" stroke="#0a0c10" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="brand-text">
+      <div class="title">AIOps · 서버실 온도</div>
+      <div class="subtitle">드리프트 감지 기반 재학습 파이프라인</div>
+    </div>
+  </div>
+  <div class="nav-right">
+    <span class="pill neutral">MODEL_SOURCE=mlflow 기준</span>
+  </div>
+</div>
+
+<div class="page">
+
+  <!-- ================= 데이터 업로드 ================= -->
+  <div class="card">
+    <div class="section-head">
+      <h2>서버실 센서 데이터 업로드</h2>
+      <p>
+        <code>data/uploads/</code>는 여기서 업로드한 CSV만 쌓이는 곳입니다. 학습(<code>train_and_register.py</code> 등)은
+        항상 가장 최근에 올라온 파일을 사용합니다. <code>data/sample_server_room.csv</code>를 예시로 올려보세요
+        (컬럼: Timestamp, Temp, LoadKW, 선택 Setpoint · 최소 720행).
+      </p>
+    </div>
+    <div class="upload-row">
+      <input type="file" id="upload-input" accept=".csv" />
+      <button class="btn primary" onclick="uploadFile()">업로드</button>
+    </div>
+    <div id="upload-status" style="margin-top:10px;"></div>
+  </div>
+
+  <!-- ================= 드리프트 시뮬레이션 ================= -->
+  <div class="card">
+    <div class="section-head">
+      <h2>드리프트 시뮬레이션</h2>
+      <p>
+        하루 주기 온도 곡선으로 정상/드리프트(설정온도 +3°C) 배치를 만들어 <code>/predict/batch-test</code>로 전송합니다.
+        배치는 직전 배치의 마지막 24시간에 이어 보내며, 서버는 이어진 배치를 재학습 데이터로 쌓습니다(192시간).
+        드리프트 배치를 여러 번 보내면 감지 → (데이터가 쌓이면) 재학습 → (게이트 통과 시) 재배포까지 진행됩니다.
+      </p>
+    </div>
+    <div class="btn-row">
+      <button class="btn primary" onclick="sendBatch('normal')">정상 배치 전송</button>
+      <button class="btn danger" onclick="sendBatch('drift')">드리프트 배치 전송</button>
+      <button class="btn secondary" onclick="sendBatch('fault')">센서 고장 배치 전송</button>
+    </div>
+    <div id="drift-status" style="margin-top:14px;"></div>
+    <div id="drift-result" class="result-box"></div>
+  </div>
+
+  <!-- ================= 파이프라인 ================= -->
+  <div class="card">
+    <div class="section-head-row">
+      <div class="section-head">
+        <h2>드리프트 감지 기반 재학습 파이프라인</h2>
+        <p>위에서 배치를 보내면, 그 요청이 실제로 거쳐간 단계를 아래에 표시합니다 (자동 스케줄러는 없고, 수동 트리거 방식입니다).</p>
+      </div>
+      <div class="pipeline-meta">
+        <span class="pill neutral" id="pipeline-run-badge">아직 실행 안 함</span>
+      </div>
+    </div>
+    <div class="pipeline-track" id="pipeline-track"></div>
+  </div>
+
+  <!-- ================= 재학습 로그 ================= -->
+  <div class="card">
+    <div class="section-head-row">
+      <div class="section-head">
+        <h2>재학습 로그</h2>
+        <p>
+          드리프트 감지·재학습 트리거는 <code>logs/aiops.log</code>에 그대로 기록됩니다.
+          <code>[WARN] drift detected</code> → <code>[INFO] retrain triggered</code> →
+          <code>[OK] new_rmse=... promoted</code>(게이트 미통과면 <code>[FAIL]</code>) 순서로 남는지 아래에서 직접 열어 확인하세요.
+        </p>
+      </div>
+    </div>
+    <div class="btn-row" id="log-file-list"></div>
+    <div id="log-content" class="result-box"></div>
+  </div>
+
+</div>
+
+<footer>서버실 온도 AIOps 실습 · 드리프트 감지 → 재학습 파이프라인 (serving_app/static/index.html)</footer>
+
+<script>
+/* ===================== 전역 상태 ===================== */
+// 서버(data/features.py, monitoring/drift_detector.py)와 동일한 값 (상수만 복제)
+const SEQ_LEN = 24;
+const WINDOW_SIZE = 24;
+const RMSE_THRESHOLD = 1.0;
+
+let lastPipelineRun = null; // { driftCheck, clientRmse, ts }
+let streamTail = null; // 직전 배치의 마지막 SEQ_LEN시간 - 다음 배치의 문맥으로 이어 보낸다
+let streamT = 0;       // 다음 배치 새 구간의 시작 시각 (하루 주기 곡선 위치)
+
+// data/generate_server_room.py와 같은 생성 규칙 (JS라 짧게 복제)
+const SETPOINT = 22.0;
+const BASE_LOAD = 400.0;
+const PIPELINE_STAGES = [
+  { key: "collect", title: "데이터 수집", desc: "요청 수신" },
+  { key: "monitor", title: "데이터 모니터링", desc: "예측 기록 누적" },
+  { key: "detect", title: "드리프트 감지", desc: "RMSE vs 임계치" },
+  { key: "trigger", title: "재학습 트리거", desc: "조건 충족 시 시작" },
+  { key: "train", title: "모델 학습", desc: "fine-tuning" },
+  { key: "register", title: "모델 등록", desc: "MLflow Registry" },
+  { key: "deploy", title: "배포", desc: "Production 승격" },
+];
+
+/* ===================== 유틸 ===================== */
+function randn() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+function tempCurve(n, start = 0) {
+  const temps = [];
+  for (let t = start; t < start + n; t++) {
+    const load = BASE_LOAD * (1 + 0.15 * Math.sin(2 * Math.PI * (t - 9) / 24)) + randn() * 5;
+    temps.push(SETPOINT + 0.02 * (load - BASE_LOAD) + 0.3 * Math.sin(2 * Math.PI * t / 24) + randn() * 0.2);
+  }
+  return temps;
+}
+function rmseOf(actual, predicted) {
+  const n = Math.min(actual.length, predicted.length);
+  if (n === 0) return null;
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += (actual[i] - predicted[i]) ** 2;
+  return Math.sqrt(sum / n);
+}
+function relTime(ts) {
+  if (!ts) return "-";
+  const diff = Math.max(0, Date.now() / 1000 - ts);
+  if (diff < 60) return `${Math.floor(diff)}초 전`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+  return `${Math.floor(diff / 86400)}일 전`;
+}
+async function getJSON(path) {
+  const res = await fetch(path);
+  const data = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, data };
+}
+// 서버가 500 등을 일반 텍스트("Internal Server Error")로 응답할 수도 있어
+// (예: 모델 파일이 없거나 MLflow에 Production 버전이 없는 경우),
+// res.json()을 바로 쓰지 않고 텍스트로 먼저 받아 파싱을 시도한다.
+async function safeJson(res) {
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (e) { return { __raw: text || "(응답 없음)" }; }
+}
+function showResult(el, obj, isError = false) {
+  el.classList.add("show");
+  el.style.borderColor = isError ? "var(--err)" : "var(--border)";
+  el.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+}
+
+/* ===================== 데이터 업로드 ===================== */
+async function uploadFile() {
+  const input = document.getElementById("upload-input");
+  const statusEl = document.getElementById("upload-status");
+  if (!input.files.length) {
+    statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>파일을 먼저 선택하세요</span>`;
+    return;
+  }
+  const form = new FormData();
+  form.append("file", input.files[0]);
+  statusEl.innerHTML = `<span class="pill neutral"><span class="dot"></span>업로드 중…</span>`;
+  try {
+    const res = await fetch("/data/upload", { method: "POST", body: form });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${data.detail || "업로드 실패"}</span>`;
+      return;
+    }
+    statusEl.innerHTML = `<span class="pill ok"><span class="dot"></span>업로드 완료: ${data.filename} (${data.rows}행)</span>`;
+  } catch (e) {
+    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>요청 실패: ${e.message}</span>`;
+  }
+}
+
+/* ===================== 재학습 로그 ===================== */
+async function loadLogFiles() {
+  const { ok, data } = await getJSON("/logs");
+  const wrap = document.getElementById("log-file-list");
+  if (!ok || !data || !data.length) {
+    wrap.innerHTML = `<span class="pill neutral">아직 로그가 없습니다 - 드리프트 배치를 보내면 logs/aiops.log가 생깁니다</span>`;
+    return;
+  }
+  wrap.innerHTML = data.map((f) =>
+    `<button class="btn secondary" onclick="openLogFile('${f.name}')">${f.name} (${f.size}B)</button>`
+  ).join("");
+}
+async function openLogFile(name) {
+  const box = document.getElementById("log-content");
+  const { ok, data } = await getJSON(`/logs/${encodeURIComponent(name)}`);
+  if (!ok || !data) { showResult(box, "불러오기 실패", true); return; }
+  showResult(box, data.content || "(비어 있음)");
+}
+
+/* ===================== 파이프라인 시각화 ===================== */
+function renderPipeline() {
+  const track = document.getElementById("pipeline-track");
+  const badge = document.getElementById("pipeline-run-badge");
+
+  if (!lastPipelineRun) {
+    badge.className = "pill neutral"; badge.textContent = "아직 실행 안 함";
+    track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, "idle", "대기 중")).join("");
+    return;
+  }
+
+  const { driftCheck, ts } = lastPipelineRun;
+  badge.className = "pill neutral";
+  badge.textContent = `마지막 실행 ${relTime(ts)}`;
+
+  const serverStatus = driftCheck.status; // "ok" | "sensor_fault" | "insufficient_data" | "retrain_triggered"
+  const promoted = driftCheck.promoted;
+
+  let states; // 7개 단계 상태: idle | ok | warn | err
+  if (serverStatus === "sensor_fault") {
+    states = ["ok", "err", "idle", "idle", "idle", "idle", "idle"];
+  } else if (serverStatus === "insufficient_data") {
+    states = ["ok", "ok", "warn", "warn", "idle", "idle", "idle"];
+  } else if (serverStatus === "retrain_triggered" && promoted === true) {
+    states = ["ok", "ok", "warn", "ok", "ok", "ok", "ok"];
+  } else if (serverStatus === "retrain_triggered" && promoted === false) {
+    states = ["ok", "ok", "warn", "ok", "ok", "warn", "idle"];
+  } else {
+    states = ["ok", "ok", "ok", "idle", "idle", "idle", "idle"];
+  }
+  const statusText = { ok: "완료", warn: "감지됨", idle: "대기 중", err: "고장 차단" };
+
+  track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, states[i], statusText[states[i]])).join("");
+}
+function stageHtml(stage, idx, state, statusLabel) {
+  return `
+    <div class="pipe-stage ${state}">
+      <div class="pipe-title">${stage.title}</div>
+      <div class="pipe-desc">${stage.desc}</div>
+      <div class="pipe-status">${statusLabel}</div>
+    </div>`;
+}
+
+/* ===================== 드리프트 배치 전송 ===================== */
+async function sendBatch(kind) {
+  const statusEl = document.getElementById("drift-status");
+  const resultBox = document.getElementById("drift-result");
+  // 드리프트: 새 24시간 설정온도 +3°C (22 → 25). 앞 24시간은 직전 배치의 끝 (처음이면 정상 곡선)
+  const fresh = tempCurve(WINDOW_SIZE, streamT).map((v) => (kind === "drift" ? v + 3 : v));
+  const temps = (streamTail || tempCurve(SEQ_LEN, streamT - SEQ_LEN)).concat(fresh);
+  if (kind === "fault") temps.fill(0, 30, 36);  // 센서 고장: 6시간 0 고정
+
+  statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>전송 중…</span>`;
+
+  try {
+    const res = await fetch("/predict/batch-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ temps }) });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      const reason = data.__raw
+        ? "서버 오류 - 모델 로드 실패일 수 있습니다 (서버 터미널 로그 확인)"
+        : `요청 오류 (HTTP ${res.status})`;
+      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${reason}</span>`;
+      showResult(resultBox, { status: res.status, detail: data }, true);
+      return;
+    }
+    const actual = [];
+    for (let i = 0; i < temps.length - SEQ_LEN; i++) actual.push(temps[i + SEQ_LEN]);
+    const clientRmse = rmseOf(actual, data.predictions || []);
+
+    // 고장 배치는 서버가 쌓지 않으므로 시계열을 끊고 새로 시작한다
+    streamTail = data.drift_check?.status === "sensor_fault" ? null : temps.slice(-SEQ_LEN);
+    streamT += WINDOW_SIZE;
+    lastPipelineRun = { driftCheck: data.drift_check || {}, clientRmse, ts: Date.now() / 1000 };
+    renderPipeline();
+    loadLogFiles();
+
+    const check = data.drift_check || {};
+    let level = "ok", label = "정상 (드리프트 없음)";
+    if (check.status === "sensor_fault") {
+      level = "err"; label = `센서 고장 · 예측·재학습 차단 (rule=${check.rule})`;
+    } else if (check.status === "insufficient_data") {
+      level = "warn"; label = `드리프트 감지 · 재학습 데이터 쌓는 중 (${check.rows}/192시간) · /predict는 직전 값으로 응답`;
+    } else if (check.status === "retrain_triggered" && check.promoted) {
+      level = "ok"; label = `재학습 완료 · 새 버전 승격 (rmse=${check.rmse?.toFixed?.(2) ?? check.rmse})`;
+    } else if (check.status === "retrain_triggered" && check.promoted === false) {
+      level = "warn"; label = `드리프트 감지 · 재학습했지만 게이트 미통과 (rmse=${check.rmse?.toFixed?.(2) ?? check.rmse})`;
+    }
+    statusEl.innerHTML = `
+      <span class="pill ${level}"><span class="dot"></span>${label}</span>
+      <span class="pill neutral" style="margin-left:6px;">클라이언트 계산 RMSE: ${clientRmse != null ? clientRmse.toFixed(2) + "°C" : "-"}</span>`;
+    showResult(resultBox, data, false);
+  } catch (e) {
+    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>연결 실패</span>`;
+    showResult(resultBox, "요청 실패: " + e.message, true);
+  }
+}
+
+/* ===================== 초기화 ===================== */
+async function init() {
+  renderPipeline();
+  loadLogFiles();
+}
+init();
+</script>
+</body>
+</html>
