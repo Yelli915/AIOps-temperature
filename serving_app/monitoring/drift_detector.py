@@ -14,7 +14,7 @@ import statistics
 
 from data.features import rmse
 
-RMSE_THRESHOLD = 1.0  # °C, 기준 모델(Day2 MLflow base) RMSE 0.22°C(노이즈 σ 0.2)의 약 5배 - 체크포인트 A에서 확정
+RMSE_THRESHOLD = 1.0  # °C, 기준 모델(Day2 MLflow base) RMSE 0.23°C(노이즈 σ 0.2)의 약 5배 - 체크포인트 A에서 확정
 BIAS_THRESHOLD = 0.4  # °C, 정상 배치 |평균 오차| 최대 0.05의 8배 - 0.5°C 이상 변화부터 잡는다
 WINDOW_SIZE = 24      # 최근 24건(하루치 예측) 기준
 

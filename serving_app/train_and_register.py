@@ -39,7 +39,7 @@ SEED = 42
 
 MODEL_NAME = "ServerRoom_Temp"
 PROD_ALIAS = "production"  # MLflow stage(deprecated) 대신 alias - model_loader.MLFLOW_ALIAS와 같은 값
-BASE_EPOCHS = 100  # 3층 LSTM + 90일(2,160시간) 데이터 기준 Day2 MLflow base RMSE 0.22°C (SEED 고정, Day1 로컬은 0.23°C - 2026-09-30 확인)
+BASE_EPOCHS = 100  # 3층 LSTM + 90일(2,160시간) 데이터 기준 Day2 MLflow base RMSE 0.23°C (SEED 고정, scripts/compare_baseline.py v1 - 2026-10-01 확인)
 FINE_TUNE_EPOCHS = 20  # 서버실: 10 epoch·1e-4로는 설정온도 상향(22→25°C)에 적응하지 못해 게이트 미통과 (변경.md #27 실험)
 FINE_TUNE_LR = 3e-4    # base 학습(1e-3)보다 낮은 학습률로 살짝만 갱신
 

@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import types
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,8 +44,8 @@ def fake_fine_tune(rows):
 
 
 # retrain_trigger가 함수 안에서 import하는 fine_tune을 가짜로 (tensorflow·mlflow 로드 없이)
-sys.modules["serving_app.train_and_register"] = types.ModuleType("serving_app.train_and_register")
-sys.modules["serving_app.train_and_register"].fine_tune = fake_fine_tune
+fake_module = types.ModuleType("serving_app.train_and_register")
+fake_module.fine_tune = fake_fine_tune
 
 
 def send(rows, setpoints=None):
@@ -57,6 +58,12 @@ def send(rows, setpoints=None):
 
 
 def test_pipeline():
+    # patch.dict: 끝나면 sys.modules·환경변수를 되돌린다 - 같은 pytest 세션의 다른 테스트에 가짜가 새지 않게
+    with patch.dict(sys.modules, {"serving_app.train_and_register": fake_module}), patch.dict(os.environ):
+        _run_pipeline()
+
+
+def _run_pipeline():
     os.environ["MODEL_SOURCE"] = "mlflow"
     model = FakeModel()
     model_loader._model_cache = model

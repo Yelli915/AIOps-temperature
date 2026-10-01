@@ -16,7 +16,8 @@ from fastapi import HTTPException, UploadFile
 
 from serving_app.routers import data as api
 
-with open("data/sample_server_room.csv", encoding="utf-8") as f:
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(ROOT, "data", "sample_server_room.csv"), encoding="utf-8") as f:
     HEADER, *ALL_LINES = f.read().splitlines()
 LINES = ALL_LINES[:720]
 
