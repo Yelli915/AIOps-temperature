@@ -1,7 +1,7 @@
 """
 FastAPI 앱 진입점.
 
-Day1: app 생성, 라우터(predict, health) 등록, startup 이벤트에서 로딩 모드에 따라 모델 준비
+Day1: app 생성, 라우터(predict, health) 등록, lifespan(시작 시)에서 로딩 모드에 따라 모델 준비
 Day2: data 라우터 등록 (서버실 센서 데이터 업로드)
 Day3: "aiops" 로거를 logs/aiops.log 파일로 연결(로깅 설정) + logs 라우터(로그 파일 조회) 등록
 
@@ -12,6 +12,7 @@ StaticFiles를 "/"에 마지막으로 mount해야, /predict 같은 API 경로가
 """
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +33,18 @@ if not _aiops_logger.handlers:
     _aiops_logger.addHandler(_handler)
     _aiops_logger.addHandler(logging.StreamHandler())  # 터미널에서도 동일하게 확인 가능
 
-app = FastAPI(title="Server Room Temp Serving & AIOps")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Day1 실습 포인트: LOADING_MODE=eager 로 켜고 서버 시작 시간을 lazy와 비교해보세요.
+    if os.getenv("LOADING_MODE", "lazy") == "eager":
+        model_loader.load_eager()
+    else:
+        print("[lazy] 모델은 첫 /predict 요청이 들어올 때 로드됩니다.")
+    yield
+
+
+app = FastAPI(title="Server Room Temp Serving & AIOps", lifespan=lifespan)
 
 app.include_router(predict.router)
 app.include_router(health.router)
@@ -41,12 +53,3 @@ app.include_router(logs.router)  # 대시보드: 재학습 로그 파일 조회
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")  # 대시보드 UI
-
-
-@app.on_event("startup")
-def startup():
-    # Day1 실습 포인트: LOADING_MODE=eager 로 켜고 서버 시작 시간을 lazy와 비교해보세요.
-    if os.getenv("LOADING_MODE", "lazy") == "eager":
-        model_loader.load_eager()
-    else:
-        print("[lazy] 모델은 첫 /predict 요청이 들어올 때 로드됩니다.")

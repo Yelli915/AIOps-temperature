@@ -1,209 +1,82 @@
 # 서버실 온도 예측 AIOps - 센서 고장에 속지 않는 자동 재학습
 
-HAIC 모델 서빙·AIOps 3일 실습 스켈레톤을 **데이터센터 서버실 온도 예측** 도메인으로 옮긴 프로젝트입니다.
-1시간 뒤 서버실(랙 흡기) 온도를 **LSTM**으로 예측하고, Day1(서빙) → Day2(MLOps) → Day3(AIOps)을 하나의 서빙 서버 위에 쌓습니다.
+데이터센터 서버실의 **1시간 뒤 온도를 LSTM으로 예측**하고, 서빙(Day1) → MLflow 학습·배포(Day2) → 드리프트 감지·자동 재학습(Day3)을 하나의 FastAPI 서버 위에 쌓은 프로젝트입니다.
 
-기존 HAIC 실습과의 차이는 Day3입니다. 기존 파이프라인은 "오차가 커지면 모델이 낡은 것"이라고 보고 무조건 재학습합니다.
-이 프로젝트는 오차가 커진 원인이 **센서 고장**일 수 있다고 보고, 드리프트 판정·재학습 전에 **데이터 검증**을 먼저 합니다.
+일반적인 AIOps 파이프라인은 "예측 오차가 커지면 모델이 낡았다"고 보고 바로 재학습합니다.
+하지만 오차의 원인이 **센서 고장**이면, 고장 데이터를 배운 모델이 배포됩니다.
+이 프로젝트는 재학습 전에 **데이터 검증**을 먼저 합니다.
 
 > **"고장 데이터로는 예측도, 재학습도 하지 않는다"**
 
-설계는 `docs/기획서.md`, 실습 산출물과 확인 결과는 `docs/필요산출물.md`, 변경 이력은 `docs/변경.md`를 참고하세요.
-작업이 끝난 문서(도메인 제안, HAIC→서버실 코드 변경 가이드, HAIC 학습 정리)는 `docs/보관/`에 있습니다.
-
-## 데이터 - 가상 데이터
-
-서버실 온도와 IT 부하가 함께 공개된 데이터는 찾기 어려워, 다음 규칙으로 1시간 단위 가상 데이터를 만듭니다
-(`data/generate_server_room.py`).
+## 동작 방식
 
 ```
-부하 L(t) = L0 × (1 + 0.15 × sin(2π(t − 9) / 24)) + 노이즈        # L0 = 400 kW, 업무 시간대 피크
-온도 T(t) = S + a × (L(t) − 400) + 0.3 × sin(2πt / 24) + 노이즈   # S = 설정온도 22°C, a = 0.02 °C/kW, 노이즈 σ = 0.2
+배치 입력 → 데이터 검증 ─ 고장 → [SKIP] 예측·재학습 차단
+                 └ 정상 → 예측 → 드리프트 판정 ─ 정상 → ok
+                                     └ 드리프트 → 직전 값 fallback 응답
+                                                 → 최근 7일 데이터로 fine-tuning
+                                                 → 게이트(RMSE ≤ 1.0°C, 현재 모델보다 우수) 통과 시 재배포
 ```
 
-| 파일 | 내용 |
-|------|------|
-| `data/sample_server_room.csv` | 정상 90일치(2,160행), 컬럼 `Timestamp, Temp, LoadKW, Setpoint`, 온도 약 20.4~23.7°C |
-| `data/scenarios/*.csv` | 시나리오별 240행 (생성 스크립트 실행 시 만들어짐) |
-
-| 시나리오 | 내용 | 기대 판정 |
-|------|------|------|
-| `normal` | 정상 | `ok` |
-| `zero` | 센서 0 고정 6시간 | `sensor_fault` (`out_of_range`) |
-| `spike` | 센서 값 1시간 +15°C | `sensor_fault` (`sudden_jump`) |
-| `missing` | 센서 결측 1시간 (CSV 빈 칸, JSON null) | `sensor_fault` (`missing`) |
-| `offset` | 센서 교정 오프셋 +3°C, 72시간 - 온도는 `setpoint`와 같고 설정온도만 22 그대로 | `sensor_fault` (`residual`) |
-| `setpoint` | 진짜 드리프트: 냉방 설정온도 22 → 25°C, 72시간 경과 | 재학습 → 재배포 |
-| `expansion` | 진짜 드리프트: 서버 증설 400 → 500kW, 72시간 경과 | 재학습 → 재배포 |
-
-`Setpoint`(냉방 설정온도)는 BMS가 아는 운전값으로, 선택 컬럼입니다. 모델 입력이 아니라 검증(잔차 규칙)에만 씁니다.
-
-시나리오는 48시간 배치를 24시간씩 밀어 9번 스트리밍합니다. 진짜 드리프트는 변화 후 24·48시간 시점에는 재학습해도
-게이트를 못 넘고(새 상태가 대부분 검증 쪽에 들어감), 72시간이 쌓인 마지막 배치에서 승격됩니다(`docs/변경.md` #27).
-
-## 모델과 운영 파라미터
-
-```
-Input (24, 2)  ->  LSTM(32, return_sequences=True)  ->  LSTM(32, return_sequences=True)
-               ->  LSTM(16)  ->  Dense(16, relu)  ->  Dense(1)
-```
-
-| 파라미터 | 값 | HAIC |
-|------|------|------|
-| 입력 | 최근 24시간 × (온도, IT 부하) | 20거래일 × (종가, 거래량) |
-| 출력 | 1시간 뒤 온도 (°C) | 다음날 종가 ($) |
-| 드리프트 판정 | 최근 24건 RMSE > 1.0°C | 최근 21건 RMSE > $4 |
-| 배포 게이트 | RMSE ≤ 1.0°C, 재학습은 같은 검증 데이터에서 현재 Production보다 낮아야 승격 | RMSE ≤ $4 |
-| 재학습 | 서빙된 최근 168 + 24시간, Production에서 warm start, 20 epoch, 학습률 3e-4 | 41행, 10 epoch, 1e-4 |
-| 재학습 검증 샘플 | 약 34개 | 약 5개 |
-| 정규화 | 물리 범위 고정: 온도 10~40°C, 부하 0~2,000kW (검증 규칙과 같은 범위) | 데이터 min-max |
-| 기준 모델 RMSE | 0.23°C (Day2 MLflow base, 생성 노이즈 σ 0.2°C 수준) | - |
-
-## 데이터 검증 규칙
-
-`serving_app/monitoring/data_validator.py` - 서빙 입력(`/predict`, `/predict/batch-test`), 재학습 데이터(서빙된 배치), base 학습 데이터(업로드 CSV)에 같은 함수를 씁니다.
-
-| 규칙 | 기준 | 잡는 고장 |
-|------|------|------|
-| `missing` | NaN·null이 1개라도 있음 | 결측 |
-| `out_of_range` | 10°C 미만 또는 40°C 초과 | 0 고정, 큰 튐 |
-| `stuck_value` | 6시간 연속 같은 값 | 값 고정 |
-| `sudden_jump` | 인접 1시간 차이 ≥ 10°C | 값 튐 |
-| `load_zero` | IT 부하 0kW 이하 (부하를 보낸 경우) | 부하 센서 0 고정 |
-| `load_out_of_range` | IT 부하 2,000kW 초과 또는 inf·NaN (부하를 보낸 경우) | 부하 센서 튐 |
-| `residual` | 3시간 평균 \|온도 − 설정온도 − 0.02 × (부하 − 400)\| > 1.5°C (부하·설정온도를 보낸 경우) | 범위 안의 고장: 교정 오프셋, 작은 튐 |
-
-`residual`은 온도를 설정온도와 부하로 설명할 수 있는지 봅니다. 설정온도 22→25 변경은 설명되고(드리프트), 같은 +3°C라도
-설정온도가 그대로면 설명되지 않습니다(고장). 설정온도를 보내지 않으면 두 경우는 구분되지 않아 이 규칙은 건너뜁니다.
-계수 0.02°C/kW·기준 400kW는 가상 데이터 생성식 값이며, 실설비는 과거 정상 데이터로 회귀해 맞춰야 합니다.
-
-base 학습(`train_baseline_v1.py`, `train_and_register.py`)은 최근 업로드가 720행(30일) 미만이거나 위 규칙에 걸리면 중단합니다.
-base 모델은 모든 fine-tuning 버전의 출발점이므로 짧은 시나리오 데이터나 고장 데이터로 다시 만들지 않기 위해서입니다.
-
-## 디렉토리 구조
-
-```
-project/
-├── data/
-│   ├── generate_server_room.py  # 가상 데이터 생성 (샘플 + 시나리오)
-│   ├── sample_server_room.csv   # 대시보드에 업로드할 샘플 (90일치)
-│   ├── scenarios/               # 시나리오별 CSV (생성됨, git 제외)
-│   ├── storage.py               # 업로드된 CSV 중 최신 파일을 찾는 latest_upload()
-│   ├── uploads/                 # 업로드된 CSV가 쌓이는 곳
-│   └── features.py              # 시퀀스 빌더(SEQ_LEN=24) + SensorScaler (전 Day 공용)
-├── scripts/
-│   ├── train_baseline_v1.py     # Day1: 로컬 baseline LSTM
-│   ├── simulate_drift.py        # Day3: 시나리오를 48시간 배치로 스트리밍
-│   └── compare_baseline.py      # LSTM vs "직전 값 그대로" RMSE 비교
-└── serving_app/
-    ├── main.py, schemas.py, lstm_model.py, model_loader.py
-    ├── train_and_register.py    # Day2 base 학습 + Day3 fine-tuning (MLflow: ServerRoom_Temp)
-    ├── Dockerfile, docker-compose.yml
-    ├── models/                  # server_room_v1.keras (train_baseline_v1.py가 생성)
-    ├── routers/                 # predict(예측 전 검증), health, data(업로드), logs
-    ├── monitoring/
-    │   ├── data_validator.py    # 센서 고장 검증 (신규)
-    │   ├── drift_detector.py    # RMSE 드리프트 판정
-    │   └── retrain_trigger.py   # 드리프트 → 검증 → fine-tuning → 재배포
-    └── static/index.html        # 대시보드 (정상 / 드리프트 / 센서 고장 배치 버튼)
-```
-
-## 실행 순서
-
-```bash
-pip install -r requirements.txt
-python data/generate_server_room.py                # 샘플 CSV + 시나리오 CSV 생성
-
-# --- Day1 ---
-uvicorn serving_app.main:app --host 0.0.0.0 --port 8077   # http://localhost:8077/ 대시보드, /docs
-# 대시보드 업로드 카드에서 data/sample_server_room.csv 업로드 (최소 720행, Timestamp 1시간 간격 오름차순)
-python scripts/train_baseline_v1.py                 # Day1 로컬 baseline RMSE 약 0.24°C (Day2 MLflow base 학습은 0.23°C)
-
-# --- Day2 ---
-python serving_app/train_and_register.py            # 게이트 통과 시 ServerRoom_Temp Production 승격
-MODEL_SOURCE=mlflow uvicorn serving_app.main:app --host 0.0.0.0 --port 8077
-
-# --- 컨테이너로 재현 ---
-docker compose -f serving_app/docker-compose.yml up --build
-
-# --- Day3 --- (서버는 Day2처럼 MODEL_SOURCE=mlflow로 띄운 상태여야 함 - local 모드면 승격 후에도 v1-local을 다시 로드)
-# 시연 시작 상태: Production을 base 모델 v1로 되돌린 뒤 서버 재시작 (롤백도 같은 명령, 버전 번호만 바꿈)
-python -c "from mlflow.tracking import MlflowClient as C; C().set_registered_model_alias('ServerRoom_Temp', 'production', '1')"
-python scripts/simulate_drift.py                     # normal → zero → spike → missing → offset → setpoint
-python scripts/simulate_drift.py normal expansion    # 원하는 시나리오만
-# Docker 서버에 보낼 때: API_BASE=http://localhost:8000 python scripts/simulate_drift.py
-```
-
-`/predict` 요청 예시 (최근 24시간, 오래된 시간 → 최근 시간):
-
-```json
-{"sequence": [{"temp": 22.1, "load_kw": 410.5, "setpoint": 22.0}, "... 24개"]}
-```
-
-`setpoint`는 선택입니다(보내면 `residual` 규칙 적용).
-응답: `{"predicted_temp": 21.15, "model_version": "v1"}` (`MODEL_SOURCE=mlflow`면 Production 버전 번호, local이면 `v1-local`) · 센서 고장이면 `422 {"detail": {"status": "sensor_fault", "rule": "out_of_range"}}`
-· 드리프트가 감지됐는데 새 모델이 아직 승격되지 않았으면 `"model_version": "fallback-last-value"` - 직전 온도를 그대로 돌려줍니다
-(드리프트 중에는 이 기준선이 LSTM보다 약 10배 정확, 아래 "기준선 비교").
-
-`/predict/batch-test` 요청: `{"temps": [...48개], "loads": [...48개], "setpoints": [...48개]}` - `loads`를 빼면 400kW로 채우고(대시보드 배치), `setpoints`는 선택입니다.
-배치는 앞 24시간이 직전 배치의 끝과 같게 이어 보냅니다. 서버는 이어진 배치를 재학습 데이터(`served_rows`, 최근 192시간)로 쌓고,
-이어지지 않으면(다른 시계열, 고장으로 빠진 배치) 끊긴 데이터를 붙여 배우지 않도록 새로 시작합니다.
-응답의 `drift_check`: `{"status": "ok"}` · `{"status": "sensor_fault", "rule": ...}` · `{"status": "insufficient_data", "rows": n}`(드리프트지만 192시간 미만 - 재학습 보류) · `{"status": "retrain_triggered", "promoted": true|false, "rmse": ...}`.
-재학습은 요청 안에서 끝까지 돌고(약 10초대), 결과는 응답과 `logs/aiops.log`의 `[OK]`(승격) · `[FAIL]`(게이트 미통과) · `[WAIT]`(데이터 부족)로 남습니다.
-승격되면 이전 모델의 오차 기록(`recent_predictions`)을 비워, 같은 오차로 재학습이 반복되지 않게 합니다.
+- **모델**: 최근 24시간 × (온도, IT 부하) → 3층 LSTM → 1시간 뒤 온도. 기준 RMSE 0.23°C
+- **데이터 검증**: 결측, 범위 밖(10~40°C), 6시간 값 고정, 10°C 이상 급변, 부하 이상, 그리고 설정온도·부하로 설명되지 않는 온도(`residual`, 교정 오프셋 고장)
+- **드리프트 판정**: 최근 24건 RMSE > 1.0°C 또는 |평균 오차| > 0.4°C
+- **데이터**: 실데이터를 구하기 어려워 가상 데이터를 씁니다(설정온도 22°C, 부하 400kW 기준 생성식)
 
 ## 결과 - 기존 규칙 vs 새 규칙
 
-| 시나리오 | 기존 규칙 (RMSE만 확인) | 새 규칙 (데이터 검증 추가) |
+| 시나리오 | 기존 (RMSE만 확인) | 이 프로젝트 (검증 추가) |
 |------|------|------|
-| normal | `ok` | `ok` |
-| zero | 고장 데이터로 **재학습 실행** (RMSE 8.97) | `[SKIP] sensor fault (rule=out_of_range)`, 예측·재학습 없음 |
-| spike | **재학습 실행** (RMSE 2.47) | `[SKIP] sensor fault (rule=sudden_jump)` |
-| missing | **HTTP 500, 로그 없음** | `[SKIP] sensor fault (rule=missing)` |
-| offset (설정온도 미전송 = 기존 규칙과 같음) | 고장 데이터로 재학습, 72시간째 **고장을 배운 모델이 승격** (0.76) | `[SKIP] sensor fault (rule=residual)` × 3 (#6~#8) |
-| setpoint | 재학습했지만 게이트 미통과 (2.45°C, 10 epoch·1e-4) | #6 `[FAIL]` 2.20 → #7 `[FAIL]` 2.12 → #8 `[OK] new_rmse=0.81`, 미승격 동안 `/predict`는 `fallback-last-value` |
-| expansion (부하 함께 전송) | (부하를 400kW로 고정해 보내 반영 안 됨) | #6 `[FAIL]` 1.66 → #7 `[FAIL]` 1.45 → #8 `[OK] new_rmse=0.38` |
+| 정상 | `ok` | `ok` |
+| 센서 0 고정 / 값 튐 | 고장 데이터로 재학습 | `sensor_fault`, 예측·재학습 차단 |
+| 센서 결측 | HTTP 500 | `sensor_fault (missing)` |
+| 교정 오프셋 +3°C | **고장을 배운 모델이 승격** | `sensor_fault (residual)` |
+| 설정온도 22→25°C (진짜 드리프트) | 게이트 미통과 | 72시간째 재학습 승격 (RMSE 0.81) |
+| 서버 증설 400→500kW (진짜 드리프트) | 부하 미반영 | 72시간째 재학습 승격 (RMSE 0.38) |
 
-zero·spike·missing은 2026-09-30, 나머지는 2026-10-01 측정(물리 범위 정규화로 다시 학습한 v1 기준).
-setpoint·expansion은 **Production v1(base)에서 시작한 값**입니다.
-이미 그 시나리오로 재학습된 버전에서 시작하면 드리프트가 잡히지 않아 `ok`가 나옵니다 - 시연 전 "시연 시작 상태" 명령으로 v1로 되돌리세요.
+## 실행
 
-## 기준선 비교 - LSTM vs "직전 값 그대로"
+```bash
+pip install -r requirements.txt
+python data/generate_server_room.py                         # 샘플·시나리오 데이터 생성
+uvicorn serving_app.main:app --port 8077                    # 대시보드 http://localhost:8077/
+# 대시보드에서 data/sample_server_room.csv 업로드 후
+python serving_app/train_and_register.py                    # MLflow 학습·Production 승격
+MODEL_SOURCE=mlflow uvicorn serving_app.main:app --port 8077
+python scripts/simulate_drift.py                            # 고장·드리프트 시나리오 스트리밍
+pytest tests                                                # 테스트
 
-모델이 단순 규칙보다 나은지 확인합니다. 기준선은 "1시간 뒤 온도 = 지금 온도"입니다 (`python scripts/compare_baseline.py`, 2026-10-01).
+docker compose -f serving_app/docker-compose.yml up --build # 컨테이너로 한 번에 (포트 8000)
+```
 
-| 구간 | LSTM v1 | 직전 값 그대로 |
-|------|------|------|
-| 학습 검증 (뒤 20%, 428건) | **0.23** | 0.36 |
-| normal 배치 (24건) | **0.26** | 0.38 |
-| setpoint 배치 | 2.78 | **0.29** |
-| expansion 배치 | 2.05 | **0.33** |
+## 구조
 
-- 정상 상태에서는 LSTM이 기준선보다 약 35% 정확합니다 (생성 노이즈 σ 0.2°C에 가까움).
-- 드리프트 중에는 기준선이 약 6~10배 정확합니다. 그래서 드리프트 감지 후 새 모델이 승격될 때까지 `/predict`는 기준선으로 응답합니다.
-- 정규화는 데이터 min-max(온도 20.36~23.66°C)가 아니라 검증 규칙과 같은 물리 범위(10~40°C, 0~2,000kW)입니다.
-  검증을 통과한 값은 모두 [0, 1] 안이라 설정온도를 올려도 외삽하지 않습니다. 실험: base RMSE 0.225 동일,
-  설정온도 28°C fine-tuning 1.31(게이트 미통과) → 0.49 (`docs/변경.md` #74).
-
-## 완료 기준
-
-- [x] 720행 미만 CSV는 `/data/upload`에서 거부된다
-- [x] 정상 배치는 RMSE ≤ 1.0°C이고 `status = "ok"`
-- [x] 0 고정 · 값 튐 · 결측 · 오프셋(설정온도 전송 시) 배치 모두 `sensor_fault` - 예측·재학습 없음, 500 없음
-- [x] 재학습 데이터는 서빙된 배치이며, 고장 배치는 쌓이지 않는다
-- [x] 진짜 드리프트는 `[WARN] → [INFO] → [OK]` 순서로 기록되고, 재배포 후 `/predict`가 새 버전으로 응답한다
-- [x] 드리프트 감지 후 승격 전까지 `/predict`는 `fallback-last-value`로 응답한다
-- [x] 대시보드에 `sensor_fault`가 고장으로 표시된다 (2026-10-01 브라우저 확인: "센서 고장 · 예측·재학습 차단", 파이프라인 "고장 차단")
-- [x] 숫자가 아닌 값(빈 부하·`abc`·`nan`)이 든 CSV는 `/data/upload`에서 400으로 거부된다 (온도 빈 칸만 허용)
-- [x] Timestamp가 뒤집혔거나 빠지거나 중복된 CSV는 400으로 거부되고, 엑셀 "CSV UTF-8"(BOM) 파일은 받는다
-- [x] 기존 규칙 vs 새 규칙 비교표 (위 "결과")
+```
+data/          가상 데이터 생성, 시퀀스·정규화 공용 코드
+scripts/       Day1 baseline 학습, 드리프트 시뮬레이션, 기준선 비교
+serving_app/   FastAPI 서버 (routers/ API, monitoring/ 검증·드리프트·재학습, static/ 대시보드)
+tests/         파이프라인·업로드 테스트 (tensorflow·MLflow 없이 실행)
+docs/          기획서, 산출물, 변경 이력, 상세 설명
+```
 
 ## 한계
 
-- **냉방기 고장(장애)은 다루지 않습니다.** 값이 정상 범위 안에서 오르므로 검증 규칙으로 드리프트와 구분되지 않습니다. 기존 설비 경보가 맡는다고 봅니다.
-- **같은 고장이 반복되면 배치마다 `[SKIP]` 로그가 남습니다.** 같은 원인은 한 번만 알리는 기능은 구현하지 않았습니다.
-- **재학습은 `/predict/batch-test` 요청 안에서 동기로 돕니다.** 그동안 해당 요청과 다른 batch-test 요청(락 1개로 한 번에 하나만 처리)이 기다리고, 게이트를 통과하지 못하면 다음 드리프트 배치마다 같은 데이터로 다시 재학습합니다. 운영에서는 작업 큐로 옮겨야 합니다.
-- **재학습 버퍼(`served_rows`)는 메모리에 있습니다.** 서버를 재시작하면 비워지고, 배치가 이어지는지는 겹치는 24시간 값이 같은지로만 봅니다. 운영에서는 Timestamp와 함께 시계열 DB에 저장해야 합니다.
-- **`residual` 규칙은 설정온도와 부하를 함께 보낼 때만 동작합니다.** 대시보드 배치는 둘 다 보내지 않아 이 규칙이 적용되지 않고, 1.5°C 미만의 작은 오프셋은 잡지 못합니다.
-- **fallback 상태는 서버 메모리에 있습니다.** 재시작하면 LSTM 응답으로 돌아갑니다.
-- **값 고정 규칙(6시간 같은 값)** 은 실데이터가 소수점 한 자리로 반올림되어 들어오면 정상에서도 걸릴 수 있습니다.
+- **검증 규칙과 데이터가 같은 식에서 나왔습니다.** `residual` 규칙은 가상 데이터 생성식(온도 = 설정온도 + a × 부하)을 그대로 역산하므로, 오프셋 고장 탐지 성공은 이 데이터에서는 거의 보장된 결과입니다. 실제 서버실은 외기 온도, 냉방기 on/off 주기, 비선형 관계가 있어 1.5°C 기준에서 오탐이 늘 수 있습니다.
+- **설정온도가 모델 입력이 아닙니다.** 설정온도는 BMS가 이미 아는 제어값인데, 이 프로젝트는 드리프트 시연을 위해 설정온도 변경을 "드리프트 → 재학습"으로 처리합니다. 실서비스라면 입력에 넣어 재학습 없이 반영하는 쪽이 맞습니다.
+- **LSTM이 꼭 필요하다는 근거가 약합니다.** 정상 상태에서 "직전 값 그대로" 기준선보다 약 35% 나은 수준이고, 데이터가 선형식으로 만들어져 단순 선형 회귀로도 비슷할 수 있습니다.
+- 재학습은 요청 안에서 동기로 돌고, 서빙 상태(재학습 버퍼·오차 기록·fallback)는 메모리에 있어 워커 1개·재시작 시 초기화를 전제합니다.
+- 게이트를 통과하지 못하면 다음 드리프트 배치마다 같은 데이터로 다시 재학습합니다.
+
+## 향후 과제
+
+- 공개 HVAC·데이터센터 데이터나 생성식을 바꾼 데이터(외기 온도, 비선형 냉방 응답)로 검증 규칙의 오탐·미탐을 다시 측정
+- 설정온도를 모델 입력에 추가하고, 설정온도 변경 시 재학습 없이 오차가 유지되는지 비교
+- 선형 회귀(검증 규칙의 회귀식 재사용) 예측 기준선을 추가해 LSTM과 RMSE 비교
+- 재학습을 작업 큐로 분리하고, 상태를 시계열 DB·Redis로 이동, 게이트 실패 후 쿨다운 추가
+
+## 문서
+
+- `docs/상세설명.md` - 데이터 생성식, 모델·운영 파라미터, 검증 규칙 전체, API 요청·응답, 기준선 비교, 완료 기준
+- `docs/기획서.md` - 배경, 목표, 설계
+- `docs/필요산출물.md` - Day별 실습 산출물과 확인 결과
+- `docs/변경.md` - 변경 이력

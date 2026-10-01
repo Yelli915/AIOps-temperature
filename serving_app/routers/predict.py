@@ -29,6 +29,9 @@ from serving_app.monitoring.data_validator import columns, validate
 router = APIRouter()
 logger = logging.getLogger("aiops")
 
+# ponytail: 아래 상태(recent_predictions·served_rows·use_fallback)는 모듈 전역 - uvicorn 워커 1개 전제.
+# 워커·컨테이너가 여럿이면 각자 따로 판정·재학습하므로 운영이면 공유 저장소로 (README 한계)
+
 # Day3: 최근 예측 기록(actual/predicted)을 쌓아두는 슬라이딩 윈도우.
 # monitoring/drift_detector.py의 WINDOW_SIZE(24)만큼만 유지한다.
 recent_predictions: list[dict] = []

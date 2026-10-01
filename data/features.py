@@ -11,10 +11,17 @@ Day1 baseline 학습(scripts/train_baseline_v1.py), Day2 MLflow 학습
 타깃: 그다음 1시간의 온도
 """
 import csv
-
-from serving_app.monitoring.data_validator import LOAD_MAX, TEMP_MAX, TEMP_MIN
+import math
 
 SEQ_LEN = 24  # LSTM 입력 윈도우 길이 (시간) - 최근 하루
+# 물리 범위 - 정규화 기준이자 센서 검증 범위(serving_app/monitoring/data_validator.py가 가져다 쓴다)
+TEMP_MIN, TEMP_MAX = 10.0, 40.0  # 서버실 항온 대역. -10~50으로 넓히면 0°C 고장을 놓친다
+LOAD_MAX = 2000.0                # kW, 기준 400kW의 5배 - 증설(500kW)은 통과, 부하 센서 튐(1e308·inf)은 차단
+
+
+def rmse(y_true, y_pred) -> float:
+    """학습 검증·드리프트 판정·기준선 비교가 모두 쓰는 RMSE (°C)."""
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / len(y_true))
 
 
 def _float_or_nan(value: str) -> float:

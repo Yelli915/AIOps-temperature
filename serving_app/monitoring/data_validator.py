@@ -6,18 +6,31 @@
 걸린 규칙 이름을 반환하고, 정상이면 None을 반환한다.
 """
 import math
+import os
+import statistics
 
-TEMP_MIN, TEMP_MAX = 10.0, 40.0  # 서버실 항온 대역. -10~50으로 넓히면 0°C 고장을 놓친다
+from data.features import LOAD_MAX, TEMP_MAX, TEMP_MIN, load_rows  # 물리 범위 - 정규화(SensorScaler)와 같은 값
+
 STUCK_HOURS = 6                   # 이 시간 동안 값이 완전히 같으면 센서 고정으로 본다
 JUMP_C = 10.0                     # 인접 1시간 차이가 이 이상이면 값 튐
 BASE_MIN_ROWS = 720               # base 학습 최소 30일 - 짧은 시나리오 CSV(240행)로 base 모델을 다시 만들지 않게
-LOAD_MAX = 2000.0                 # kW, 기준 400kW의 5배 - 증설(500kW)은 통과, 부하 센서 튐(1e308·inf)은 차단
 # 잔차 규칙: 온도 ≈ 설정온도 + LOAD_GAIN × (부하 − REF_LOAD). 범위 안의 고장(오프셋·작은 튐)을 잡는다.
-# ponytail: 선형 물리식 하나 - 실설비는 과거 정상 데이터로 LOAD_GAIN·REF_LOAD를 회귀해 맞출 것 (교정 값)
-LOAD_GAIN = 0.02                  # °C/kW, 부하 1kW당 온도 상승
-REF_LOAD = 400.0                  # kW, 설정온도에서 운전하는 기준 부하
+# 계수는 생성식 값(0.02·400)을 적어 두지 않고 과거 정상 데이터(CALIBRATION_CSV)에서 회귀로 구한다 -
+# 실설비는 이 파일을 그 설비의 정상 구간 CSV(Timestamp·Temp·LoadKW·Setpoint)로 바꾸면 된다.
+# ponytail: 선형식 하나 - 계절·외기 영향이 크면 외기온도를 회귀 변수로 추가
+CALIBRATION_CSV = os.path.join(os.path.dirname(__file__), "..", "..", "data", "sample_server_room.csv")
 RESIDUAL_HOURS = 3                # 잔차를 이 시간만큼 평균 - 노이즈(σ 0.2)·하루 주기(±0.3)는 평균 0.7 미만
 RESIDUAL_C = 1.5                  # 평균 잔차가 이를 넘으면 설정온도·부하로 설명되지 않는 온도
+
+
+def fit_residual(rows: list[dict]) -> tuple[float, float]:
+    """정상 rows에서 (온도 − 설정온도) = LOAD_GAIN × 부하 + b 를 최소제곱으로 맞춰 (LOAD_GAIN, REF_LOAD) 반환."""
+    rows = [r for r in rows if r.get("Setpoint") is not None and not math.isnan(r["Temp"])]
+    gain, b = statistics.linear_regression([r["LoadKW"] for r in rows], [r["Temp"] - r["Setpoint"] for r in rows])
+    return gain, -b / gain  # b = −LOAD_GAIN × REF_LOAD
+
+
+LOAD_GAIN, REF_LOAD = fit_residual(load_rows(CALIBRATION_CSV))  # °C/kW, kW
 
 
 def validate(temps: list, loads: list | None = None, setpoints: list | None = None) -> str | None:
@@ -25,6 +38,8 @@ def validate(temps: list, loads: list | None = None, setpoints: list | None = No
         return "load_zero"
     if loads and any(not l <= LOAD_MAX for l in loads):  # inf·NaN도 여기서 걸린다
         return "load_out_of_range"
+    if setpoints and any(not math.isfinite(s) for s in setpoints):  # NaN이면 잔차도 NaN이라 residual이 조용히 통과한다
+        return "setpoint_invalid"
     if any(t is None or math.isnan(t) for t in temps):
         return "missing"
     if any(not TEMP_MIN <= t <= TEMP_MAX for t in temps):
@@ -81,8 +96,16 @@ if __name__ == "__main__":
     assert validate(shifted, loads, [22.0] * 24 + [25.0] * 24) is None          # 설정온도 변경 - 드리프트
     assert validate(shifted, loads, [22.0] * 48) == "residual"                  # 오프셋 고장
     assert validate(shifted, loads) is None                                      # 설정온도 모르면 못 가름
+    assert validate(shifted, loads, [float("nan")] * 48) == "setpoint_invalid"  # NaN 설정온도로 잔차 규칙 우회 차단
     assert validate(temps[:30] + [temps[30] + 9] + temps[31:], loads, [22.0] * 48) == "residual"  # 범위 안 작은 튐
     assert validate([t + 2 for t in temps], [l + 100 for l in loads], [22.0] * 48) is None        # 증설: 부하로 설명됨
+    # 회귀로 구한 계수로 시나리오 기대 판정이 그대로 나와야 한다 (README 시나리오 표)
+    from data.generate_server_room import scenarios
+    expected = {"normal": None, "setpoint": None, "expansion": None, "offset": "residual",
+                "zero": "out_of_range", "spike": "sudden_jump", "missing": "missing"}
+    for name, rows in scenarios().items():
+        assert all(validate(*columns(rows[i : i + 48])) is None for i in range(0, 121, 24)), name  # 변화(168시간) 전 배치는 정상
+        assert validate(*columns(rows[-48:])) == expected[name], name
     rows = [{"Temp": t, "LoadKW": 400.0} for t in normal] * 15  # 720행
     check_base_rows(rows)
     for bad in (rows[:240], rows[:-1] + [{"Temp": float("nan"), "LoadKW": 400.0}]):

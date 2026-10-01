@@ -68,7 +68,7 @@ async def upload(file: UploadFile = File(...)):
             raise HTTPException(400, f"{line_no}행: Timestamp는 1시간 간격으로 오름차순이어야 합니다 ({a} → {b}).")
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    dest = os.path.join(UPLOAD_DIR, f"server_room_{int(time.time())}.csv")
+    dest = os.path.join(UPLOAD_DIR, f"server_room_{time.time_ns()}.csv")  # 초 단위면 1초 안에 두 번 올릴 때 덮어쓴다
     with open(dest, "w", encoding="utf-8", newline="") as f:
         f.write(text)
 

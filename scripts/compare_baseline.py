@@ -8,7 +8,6 @@ LSTM vs "직전 값 그대로"(1시간 뒤 온도 = 지금 온도) 기준선 RMS
 실행: python scripts/compare_baseline.py        # 기본 v1 (시연 시작 모델)
       python scripts/compare_baseline.py 6      # 다른 버전
 """
-import math
 import os
 import sys
 
@@ -17,13 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import mlflow.tensorflow
 import numpy as np
 
-from data.features import SEQ_LEN, SensorScaler, build_sequences, load_rows, train_test_split
+from data.features import SEQ_LEN, SensorScaler, build_sequences, load_rows, rmse, train_test_split
 from data.generate_server_room import scenarios
 from serving_app.model_loader import MLFLOW_MODEL_NAME
-
-
-def rmse(a, b) -> float:
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)) / len(a))
 
 
 def main():

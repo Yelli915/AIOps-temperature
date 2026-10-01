@@ -1,7 +1,7 @@
 """
 Day3: 드리프트 감지 -> 데이터 검증 -> fine-tuning 재학습 -> 재배포를 잇는 파이프라인의 핵심 조립 지점.
 
-흐름: 이상 탐지(RMSE > 1.0°C) -> 알림 -> 서빙된 최근 7일 데이터 -> 데이터 검증(센서 고장이면 중단) ->
+흐름: 이상 탐지(RMSE > 1.0°C 또는 |평균 오차| > 0.4°C) -> 알림 -> 서빙된 최근 7일 데이터 -> 데이터 검증(센서 고장이면 중단) ->
       Production 가중치에서 이어서 fine-tuning(warm start) -> 게이트 재검증 ->
       Production 재배포 (통과 못하면 기존 버전 유지)
 
@@ -16,6 +16,7 @@ Production 가중치에서 이어서 짧게 미세조정하는 쪽이 훨씬 안
 드리프트를 판정한 데이터로 재학습해야 하므로 업로드 CSV를 쓰지 않습니다. 192시간이 안 쌓였으면 기다립니다.
 """
 import logging
+import os
 
 from serving_app.monitoring.drift_detector import is_drift
 
@@ -29,6 +30,10 @@ def check_and_trigger(recent_predictions: list[dict], served_rows: list[dict]) -
         return {"status": "ok"}
 
     logger.warning("[WARN] drift detected - triggering retrain")
+    # local 모드는 승격해도 v1-local 파일을 다시 로드한다 - 재학습해도 서빙 모델이 바뀌지 않으므로 아예 돌리지 않는다
+    if os.getenv("MODEL_SOURCE", "local") != "mlflow":
+        logger.warning("[SKIP] MODEL_SOURCE=local - retrain needs MODEL_SOURCE=mlflow, keeping v1-local")
+        return {"status": "retrain_disabled"}
 
     from data.features import SEQ_LEN
     from serving_app import model_loader

@@ -329,13 +329,13 @@ function renderPipeline() {
   badge.className = "pill neutral";
   badge.textContent = `마지막 실행 ${relTime(ts)}`;
 
-  const serverStatus = driftCheck.status; // "ok" | "sensor_fault" | "insufficient_data" | "retrain_triggered"
+  const serverStatus = driftCheck.status; // "ok" | "sensor_fault" | "insufficient_data" | "retrain_disabled" | "retrain_triggered"
   const promoted = driftCheck.promoted;
 
   let states; // 7개 단계 상태: idle | ok | warn | err
   if (serverStatus === "sensor_fault") {
     states = ["ok", "err", "idle", "idle", "idle", "idle", "idle"];
-  } else if (serverStatus === "insufficient_data") {
+  } else if (serverStatus === "insufficient_data" || serverStatus === "retrain_disabled") {
     states = ["ok", "ok", "warn", "warn", "idle", "idle", "idle"];
   } else if (serverStatus === "retrain_triggered" && promoted === true) {
     states = ["ok", "ok", "warn", "ok", "ok", "ok", "ok"];
@@ -396,6 +396,8 @@ async function sendBatch(kind) {
       level = "err"; label = `센서 고장 · 예측·재학습 차단 (rule=${check.rule})`;
     } else if (check.status === "insufficient_data") {
       level = "warn"; label = `드리프트 감지 · 재학습 데이터 쌓는 중 (${check.rows}/192시간) · /predict는 직전 값으로 응답`;
+    } else if (check.status === "retrain_disabled") {
+      level = "warn"; label = "드리프트 감지 · MODEL_SOURCE=local이라 재학습 안 함 (mlflow로 서버 재시작) · /predict는 직전 값으로 응답";
     } else if (check.status === "retrain_triggered" && check.promoted) {
       level = "ok"; label = `재학습 완료 · 새 버전 승격 (rmse=${check.rmse?.toFixed?.(2) ?? check.rmse})`;
     } else if (check.status === "retrain_triggered" && check.promoted === false) {

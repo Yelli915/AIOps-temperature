@@ -18,17 +18,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.features import load_rows, build_sequences, train_test_split, SensorScaler
+from data.features import load_rows, build_sequences, rmse, train_test_split, SensorScaler
 from data.storage import latest_upload
 from serving_app.lstm_model import build_model
 from serving_app.monitoring.data_validator import check_base_rows
 
 MODEL_PATH = "serving_app/models/server_room_v1.keras"
 BASE_EPOCHS = 100  # 3층 LSTM + 90일(2,160시간) 데이터 기준 Day1 로컬 RMSE 0.23°C (시드 미고정, Day2 MLflow base는 0.22°C - 2026-09-30 확인)
-
-
-def rmse(y_true, y_pred) -> float:
-    return (sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / len(y_true)) ** 0.5
 
 
 def main():
